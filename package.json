@@ -1,0 +1,10 @@
+{
+  "name": "work-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "python api/index.py",
+    "build": "echo \"Python app uses @vercel/python; no frontend build required.\"",
+    "start": "python api/index.py"
+  }
+}
