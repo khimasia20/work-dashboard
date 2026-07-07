@@ -1,0 +1,8 @@
+.vercel
+__pycache__/
+*.py[cod]
+.env
+.env.local
+.venv/
+venv/
+*.log
