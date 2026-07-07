@@ -657,22 +657,50 @@ def fetch_current_prices(symbols: list[str]) -> dict[str, float]:
     return prices
 
 
-def fetch_fundamentals(symbol: str) -> dict[str, float | None]:
-    try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.get_info()
-    except Exception:
-        return {}
+def fetch_fundamentals(symbol: str, current_price: float | None = None) -> dict[str, float | None]:
+    ticker = yf.Ticker(symbol)
 
-    dividend_yield = finite(info.get("dividendYield"))
-    if dividend_yield is not None and dividend_yield <= 1:
-        dividend_yield *= 100
+    target_mean_price = None
+    dividend_yield = None
+    trailing_pe = None
+    forward_pe = None
+
+    try:
+        targets = ticker.get_analyst_price_targets()
+        target_mean_price = finite(targets.get("mean"))
+    except Exception:
+        pass
+
+    try:
+        earnings_history = ticker.get_earnings_history()
+        eps_actual = earnings_history["epsActual"].dropna().tail(4)
+        trailing_eps = finite(eps_actual.sum()) if len(eps_actual) == 4 else None
+        if current_price is not None and trailing_eps and trailing_eps > 0:
+            trailing_pe = current_price / trailing_eps
+    except Exception:
+        pass
+
+    try:
+        earnings_estimate = ticker.get_earnings_estimate()
+        forward_eps = finite(earnings_estimate.loc["+1y", "avg"])
+        if current_price is not None and forward_eps and forward_eps > 0:
+            forward_pe = current_price / forward_eps
+    except Exception:
+        pass
+
+    try:
+        dividends = ticker.get_dividends()
+        annual_dividend = finite(dividends.dropna().tail(4).sum()) if not dividends.empty else None
+        if current_price is not None and annual_dividend is not None and current_price > 0:
+            dividend_yield = annual_dividend / current_price * 100
+    except Exception:
+        pass
 
     return {
-        "target_mean_price": finite(info.get("targetMeanPrice")),
+        "target_mean_price": target_mean_price,
         "dividend_yield": dividend_yield,
-        "trailing_pe": finite(info.get("trailingPE")),
-        "forward_pe": finite(info.get("forwardPE")),
+        "trailing_pe": trailing_pe,
+        "forward_pe": forward_pe,
     }
 
 
@@ -680,7 +708,10 @@ def enrich_positions(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     batch_prices = fetch_current_prices([row["symbol"] for row in positions])
     quotes: dict[str, dict[str, float | None]] = {}
     with ThreadPoolExecutor(max_workers=min(8, len(positions))) as executor:
-        futures = {executor.submit(fetch_fundamentals, row["symbol"]): row["symbol"] for row in positions}
+        futures = {
+            executor.submit(fetch_fundamentals, row["symbol"], batch_prices.get(row["symbol"]) or row.get("uploaded_price")): row["symbol"]
+            for row in positions
+        }
         for future in as_completed(futures):
             quotes[futures[future]] = future.result()
 
