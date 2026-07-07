@@ -7,6 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yfinance as yf
 from flask import Flask, jsonify, make_response, render_template_string, request
@@ -17,6 +18,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 app = Flask(__name__)
+EASTERN_TIME = ZoneInfo("America/New_York")
 
 
 HTML = r"""
@@ -197,6 +199,37 @@ HTML = r"""
         letter-spacing: 0.04em;
       }
 
+      .sort-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 5px;
+        width: 100%;
+        min-height: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: inherit;
+        cursor: pointer;
+      }
+
+      th:first-child .sort-button,
+      th:nth-child(2) .sort-button {
+        justify-content: flex-start;
+      }
+
+      .sort-arrow {
+        display: inline-block;
+        width: 10px;
+        color: var(--accent-2);
+        font-size: 11px;
+        line-height: 1;
+      }
+
       td:first-child, th:first-child,
       td:nth-child(2), th:nth-child(2) {
         text-align: left;
@@ -266,20 +299,20 @@ HTML = r"""
         <table id="table" hidden>
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>Description</th>
-              <th>Qty</th>
-              <th>Avg Cost</th>
-              <th>Current</th>
-              <th>Market Value</th>
-              <th>Cost Basis</th>
-              <th>P/L</th>
-              <th>P/L %</th>
-              <th>Div Yield</th>
-              <th>Avg Target</th>
-              <th>Upside</th>
-              <th>Trailing PE</th>
-              <th>Forward PE</th>
+              <th><button class="sort-button" type="button" data-key="symbol" data-kind="text">Symbol <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="description" data-kind="text">Description <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="quantity" data-kind="number">Qty <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="average_cost" data-kind="number">Avg Cost <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="current_price" data-kind="number">Current <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="market_value" data-kind="number">Market Value <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="cost_basis" data-kind="number">Cost Basis <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="pl" data-kind="number">P/L <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="pl_percent" data-kind="number">P/L % <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="dividend_yield" data-kind="number">Div Yield <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="target_mean_price" data-kind="number">Avg Target <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="potential_upside" data-kind="number">Upside <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="trailing_pe" data-kind="number">Trailing PE <span class="sort-arrow"></span></button></th>
+              <th><button class="sort-button" type="button" data-key="forward_pe" data-kind="number">Forward PE <span class="sort-arrow"></span></button></th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -297,7 +330,10 @@ HTML = r"""
       const table = document.getElementById("table");
       const tbody = table.querySelector("tbody");
       const empty = document.getElementById("empty");
+      const sortButtons = Array.from(document.querySelectorAll(".sort-button"));
+      const savedCsvKey = "portfolioDashboardCsv:v1";
       let latestDashboard = null;
+      let currentSort = { key: null, direction: "asc", kind: "text" };
 
       const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
       const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
@@ -321,6 +357,15 @@ HTML = r"""
         return "";
       }
 
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
       function renderSummary(summary) {
         const metrics = [
           ["Market Value", fmtMoney(summary.total_market_value)],
@@ -338,11 +383,38 @@ HTML = r"""
         summaryEl.hidden = false;
       }
 
+      function sortedRows(rows) {
+        if (!currentSort.key) return [...rows];
+        const direction = currentSort.direction === "asc" ? 1 : -1;
+        return [...rows].sort((a, b) => {
+          const aValue = a[currentSort.key];
+          const bValue = b[currentSort.key];
+          const aMissing = aValue === null || aValue === undefined || aValue === "";
+          const bMissing = bValue === null || bValue === undefined || bValue === "";
+          if (aMissing && bMissing) return 0;
+          if (aMissing) return 1;
+          if (bMissing) return -1;
+          if (currentSort.kind === "number") {
+            return (Number(aValue) - Number(bValue)) * direction;
+          }
+          return String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" }) * direction;
+        });
+      }
+
+      function updateSortArrows() {
+        sortButtons.forEach((button) => {
+          const arrow = button.querySelector(".sort-arrow");
+          const active = button.dataset.key === currentSort.key;
+          arrow.textContent = active ? (currentSort.direction === "asc" ? "▲" : "▼") : "";
+          button.setAttribute("aria-sort", active ? (currentSort.direction === "asc" ? "ascending" : "descending") : "none");
+        });
+      }
+
       function renderRows(rows) {
         tbody.innerHTML = rows.map(row => `
           <tr>
-            <td><strong>${row.symbol}</strong></td>
-            <td>${row.description || ""}</td>
+            <td><strong>${escapeHtml(row.symbol)}</strong></td>
+            <td>${escapeHtml(row.description)}</td>
             <td>${fmtNumber(row.quantity)}</td>
             <td>${fmtMoney(row.average_cost)}</td>
             <td>${fmtMoney(row.current_price)}</td>
@@ -359,32 +431,59 @@ HTML = r"""
         `).join("");
         table.hidden = false;
         empty.hidden = true;
+        updateSortArrows();
+      }
+
+      function renderDashboard(payload) {
+        latestDashboard = payload;
+        renderSummary(payload.summary);
+        renderRows(sortedRows(payload.rows));
+        pdfBtn.disabled = false;
+      }
+
+      async function analyzeCsvText(csvText, saveCsv, loadingMessage) {
+        analyzeBtn.disabled = true;
+        pdfBtn.disabled = true;
+        statusEl.textContent = loadingMessage;
+
+        try {
+          const response = await fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ csv_text: csvText })
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Unable to analyze CSV.");
+          if (saveCsv) localStorage.setItem(savedCsvKey, csvText);
+          renderDashboard(payload);
+          statusEl.textContent = `Loaded ${payload.rows.length} positions. Last updated ${payload.generated_at}.`;
+        } catch (error) {
+          statusEl.textContent = error.message;
+          pdfBtn.disabled = latestDashboard === null;
+        } finally {
+          analyzeBtn.disabled = false;
+        }
       }
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!fileInput.files.length) return;
+        const csvText = await fileInput.files[0].text();
+        currentSort = { key: null, direction: "asc", kind: "text" };
+        await analyzeCsvText(csvText, true, "Reading positions and fetching live market data...");
+      });
 
-        const data = new FormData();
-        data.append("file", fileInput.files[0]);
-        analyzeBtn.disabled = true;
-        pdfBtn.disabled = true;
-        statusEl.textContent = "Reading positions and fetching live market data...";
-
-        try {
-          const response = await fetch("/api/analyze", { method: "POST", body: data });
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.error || "Unable to analyze CSV.");
-          latestDashboard = payload;
-          renderSummary(payload.summary);
-          renderRows(payload.rows);
-          pdfBtn.disabled = false;
-          statusEl.textContent = `Loaded ${payload.rows.length} positions. Data refreshed ${payload.generated_at}.`;
-        } catch (error) {
-          statusEl.textContent = error.message;
-        } finally {
-          analyzeBtn.disabled = false;
-        }
+      sortButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.key;
+          const kind = button.dataset.kind;
+          if (currentSort.key === key) {
+            currentSort.direction = currentSort.direction === "asc" ? "desc" : "asc";
+          } else {
+            currentSort = { key, kind, direction: "asc" };
+          }
+          if (latestDashboard) renderRows(sortedRows(latestDashboard.rows));
+        });
       });
 
       pdfBtn.addEventListener("click", async () => {
@@ -416,6 +515,13 @@ HTML = r"""
           statusEl.textContent = error.message;
         } finally {
           pdfBtn.disabled = false;
+        }
+      });
+
+      window.addEventListener("DOMContentLoaded", () => {
+        const savedCsv = localStorage.getItem(savedCsvKey);
+        if (savedCsv) {
+          analyzeCsvText(savedCsv, false, "Refreshing saved portfolio with live market data...");
         }
       });
     </script>
@@ -538,7 +644,10 @@ def fetch_current_prices(symbols: list[str]) -> dict[str, float]:
             if len(symbols) == 1:
                 close = data["Close"].dropna()
             else:
-                close = data[(symbol, "Close")].dropna()
+                try:
+                    close = data["Close"][symbol].dropna()
+                except Exception:
+                    close = data[(symbol, "Close")].dropna()
             if not close.empty:
                 value = finite(close.iloc[-1])
                 if value is not None:
@@ -650,6 +759,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float | None]:
     }
 
 
+def eastern_timestamp() -> str:
+    return datetime.now(EASTERN_TIME).strftime("%Y-%m-%d %I:%M %p ET")
+
+
 @app.get("/")
 def home():
     return render_template_string(HTML)
@@ -657,18 +770,28 @@ def home():
 
 @app.post("/api/analyze")
 def analyze():
-    uploaded = request.files.get("file")
-    if uploaded is None or not uploaded.filename:
+    csv_bytes: bytes | None = None
+    if request.is_json:
+        csv_text = (request.get_json(silent=True) or {}).get("csv_text")
+        if isinstance(csv_text, str) and csv_text.strip():
+            csv_bytes = csv_text.encode("utf-8")
+    else:
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            return jsonify({"error": "Please upload a CSV file."}), 400
+        if not uploaded.filename.lower().endswith(".csv"):
+            return jsonify({"error": "Only CSV files are supported."}), 400
+        csv_bytes = uploaded.read()
+
+    if not csv_bytes:
         return jsonify({"error": "Please upload a CSV file."}), 400
-    if not uploaded.filename.lower().endswith(".csv"):
-        return jsonify({"error": "Only CSV files are supported."}), 400
 
     try:
-        positions = parse_positions(uploaded.read())
+        positions = parse_positions(csv_bytes)
         rows = enrich_positions(positions)
         return jsonify(
             {
-                "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                "generated_at": eastern_timestamp(),
                 "rows": rows,
                 "summary": summarize(rows),
             }
@@ -685,7 +808,7 @@ def pdf():
     payload = request.get_json(silent=True) or {}
     rows = payload.get("rows") or []
     summary = payload.get("summary") or {}
-    generated_at = payload.get("generated_at") or datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    generated_at = payload.get("generated_at") or eastern_timestamp()
     if not rows:
         return jsonify({"error": "No dashboard rows were provided."}), 400
 
